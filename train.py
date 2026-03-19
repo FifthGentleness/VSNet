@@ -1,74 +1,104 @@
-import time
-import datetime
-import numpy as np
-import matplotlib.pyplot as plt
-import cv2
+import time  # 导入时间模块
+import datetime  # 导入日期时间模块
+import numpy as np  # 导入NumPy库，用于数值计算
+import matplotlib.pyplot as plt  # 导入Matplotlib库，用于绘图
+import cv2  # 导入OpenCV库，用于图像处理
+import os  # 导入操作系统模块，用于文件和目录操作
+import torch  # 导入PyTorch深度学习框架
+import torch.nn as nn  # 导入PyTorch的神经网络模块
+import torch.optim as optim  # 导入PyTorch的优化器模块
+from torch.optim.lr_scheduler import MultiStepLR  # 导入多步学习率调度器
+from torch.utils.data import DataLoader  # 导入数据加载器
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim.lr_scheduler import MultiStepLR
-from torch.utils.data import DataLoader
+import tensorboard_logger as tb  # 导入TensorBoard日志记录器
 
-import tensorboard_logger as tb
+import dataset  # 导入自定义数据集模块
+from model import VSNet, combined_loss_quat  # 从模型模块导入VSNet类和组合损失函数
+from utils import check_dir, axis_angle_from_quat, normalize_q, get_stem, accuracy_thres_curve  # 导入工具函数
+from transformations import angle_between_vectors, euler_from_quaternion  # 导入变换相关函数
 
-import dataset
-from model import VSNet, combined_loss_quat
-from utils import check_dir, axis_angle_from_quat, normalize_q, get_stem, accuracy_thres_curve
-from transformations import angle_between_vectors, euler_from_quaternion
+# 模型配置参数
+model_name = 'VSNet-M8-900train'  # 模型名称
+model_pretrained = None  # 预训练模型路径，None表示不使用预训练
+num_classes = 7  # 输出类别数，6DOF位姿(3平移+3旋转)加1个额外参数
 
-model_name = 'VSNet-rotate-3900train'
-model_pretrained = None
-num_classes = 7
+# 数据集配置参数
+root_dir = './VSNet_Dataset'  # 数据根目录
+pattern = 'six_dof_1cm5deg_'  # 数据集模式，表示六自由度误差在1cm和5度范围内
+set_list = [ # 可选数据集列表（已注释）
+ 'A1',
+ 'A3',
+ 'B1',
+ 'B2',
+ 'B3',
+ 'C1',
+ 'C2',
+ 'C3']
+#set_list = ['rotate']  # 使用的数据集列表，这里只使用旋转数据集
 
-root_dir = '/home/xinmatrix/data/fyp_ycj'
-pattern = 'six_dof_1cm5deg_'
-#set_list = [#'new',
- # 'White',
-# 'A2']
-#  'White_small',
-#   'A3',
-#  'B2',
-#  'C1',
-#  'C2',
-#   'C3']
-set_list = ['rotate']
+# 构建图像和标签目录列表
+img_dir_list = [root_dir + '/' + pattern + my_set + '/img' for my_set in set_list]  # 图像目录列表
+label_dir_list = [root_dir + '/' + pattern + my_set + '/label' for my_set in set_list]  # 标签目录列表
 
-img_dir_list = [root_dir + '/' + pattern + my_set + '/img' for my_set in set_list]
-label_dir_list = [root_dir + '/' + pattern + my_set + '/label' for my_set in set_list]
+# 保存配置参数
+save_root_dir = './results'  # 保存根目录
+log_name = save_root_dir + '/' + model_name + '/' + 'log.txt'  # 日志文件路径
+img_size = (640, 480)  # 输入图像尺寸
 
-save_root_dir = './'
-log_name = save_root_dir + '/' + model_name + '/' + 'log.txt'
-img_size = (640, 480)
+# 数据集大小配置
+train_size_list = [900] * len(set_list)  # 每个数据集的训练样本数量
+dev_size_list = [50] * len(set_list)  # 每个数据集的验证样本数量
+test_size_list = [50] * len(set_list)  # 每个数据集的测试样本数量
 
-train_size_list = [3900] * len(set_list)
-dev_size_list = [50] * len(set_list)
-test_size_list = [50] * len(set_list)
+# 训练配置参数
+num_epochs = 10  # 训练轮数
+batch_size = 256  # 批处理大小
+aug_factor = 1  # 数据增强因子，增强比例为25%
+num_workers = 8  # 数据加载的工作进程数
 
-num_epochs = 10
-batch_size = 256
-aug_factor = 0.25
-num_workers = 8
+# 优化器配置参数
+learning_rate = 1e-4  # 学习率
+milestones = [int(num_epochs * 0.4), int(num_epochs * 0.6), int(num_epochs * 0.8)]  # 学习率调整的关键点
+# milestones = list(range(num_epochs))  # 可选：每个epoch都调整学习率
+gamma = 0.5  # 学习率衰减倍数
+momentum = 0.9  # 动量参数
+# gamma = 0.3  # 可选的学习率衰减倍数
+limits = None  # 偏差限制，None表示不限制
+weights = [0.99, 0.01]  # 损失权重，平移和旋转的权重分配
 
-learning_rate = 1e-4
-milestones = [int(num_epochs * 0.4), int(num_epochs * 0.6), int(num_epochs * 0.8)]
-# milestones = list(range(num_epochs))
-gamma = 0.5
-momentum = 0.9
-# gamma = 0.3
-limits = None
-weights = [0.99, 0.01]
+# 运行模式配置
+mode = ('train', 'train')  # 运行模式：训练训练集
+# mode = ('eval', 'train')  # 评估训练集
+# mode = ('eval', 'dev')  # 评估验证集
+# mode = ('eval', 'test')  # 评估测试集
 
-mode = ('train', 'train')  # train train set
-# mode = ('eval', 'train')  # eval train set
-# mode = ('eval', 'dev')  # eval dev set
-# mode = ('eval', 'test')  # eval test set
+random_seed = 2  # 随机种子，确保结果可复现
 
-random_seed = 2
+CUDA_DEVICE_ID = 0  # CUDA设备编号
+GPU_IDS = [0]  # GPU设备ID列表，可以设置多个GPU如[0, 1, 2, 3]
 
+# 断点保存和恢复配置
+resume_training = False  # 是否从断点恢复训练
+checkpoint_interval = 1  # 每隔多少个epoch保存一次断点
+checkpoint_path = save_root_dir + '/' + model_name + '/checkpoint.pth'  # 断点文件路径
 
-def prepare_loaders(return_path=False):
-    train_set_paths, dev_set_paths, test_set_paths = fyp_dataset.split_sets(img_dir_list=img_dir_list,
+def prepare_loaders(return_path=False):  # 准备数据加载器的函数
+    """
+    准备训练、验证和测试数据加载器
+    
+    参数:
+        return_path: 是否返回图像路径，用于评估时可视化错误样本
+    
+    返回:
+        train_loader: 训练数据加载器
+        dev_loader: 验证数据加载器
+        test_loader: 测试数据加载器
+        train_size_aug: 增强后的训练集大小
+        dev_size_aug: 增强后的验证集大小
+        test_size_aug: 增强后的测试集大小
+    """
+    # 使用dataset模块的split_sets函数分割数据集
+    train_set_paths, dev_set_paths, test_set_paths = dataset.split_sets(img_dir_list=img_dir_list,
                                                                             label_dir_list=label_dir_list,
                                                                             train_size_list=train_size_list,
                                                                             dev_size_list=dev_size_list,
@@ -77,14 +107,17 @@ def prepare_loaders(return_path=False):
                                                                             aug_factor=aug_factor,
                                                                             limits=limits, weights=weights)
 
+    # 创建数据集实例
     train_set = dataset.VSDataset(set_paths=train_set_paths, img_size=img_size, return_path=return_path)
     dev_set = dataset.VSDataset(set_paths=dev_set_paths, img_size=img_size, return_path=return_path)
     test_set = dataset.VSDataset(set_paths=test_set_paths, img_size=img_size, return_path=return_path)
 
+    # 获取增强后的数据集大小
     train_size_aug = len(train_set)
     dev_size_aug = len(dev_set)
     test_size_aug = len(test_set)
 
+    # 创建数据加载器
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     dev_loader = DataLoader(dev_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
@@ -92,94 +125,186 @@ def prepare_loaders(return_path=False):
     return train_loader, dev_loader, test_loader, train_size_aug, dev_size_aug, test_size_aug
 
 
-def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):
-    check_dir(save_root_dir + '/' + model_name)
+def save_checkpoint(model, optimizer, scheduler, epoch, tb_count, checkpoint_path):
+    """
+    保存训练断点
+    
+    参数:
+        model: 模型
+        optimizer: 优化器
+        scheduler: 学习率调度器
+        epoch: 当前epoch
+        tb_count: TensorBoard计数器
+        checkpoint_path: 断点保存路径
+    """
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict() if hasattr(model, 'state_dict') else model.module.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'tb_count': tb_count
+    }
+    torch.save(checkpoint, checkpoint_path)
+    print('Checkpoint saved at {}'.format(checkpoint_path))
 
-    device = torch.device('cuda')
 
-    if model_pretrained:
+def load_checkpoint(checkpoint_path, device):
+    """
+    加载训练断点
+    
+    参数:
+        checkpoint_path: 断点文件路径
+        device: 设备
+    
+    返回:
+        checkpoint: 断点数据
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    print('Checkpoint loaded from {}'.format(checkpoint_path))
+    print('Resuming from epoch {}'.format(checkpoint['epoch']))
+    return checkpoint
+
+
+def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训练模式函数
+    """
+    训练模型并在验证集上评估
+    
+    参数:
+        train_loader: 训练数据加载器
+        dev_loader: 验证数据加载器
+        train_size_aug: 增强后的训练集大小
+        dev_size_aug: 增强后的验证集大小
+    """
+    check_dir(save_root_dir + '/' + model_name)  # 检查并创建保存目录
+
+    device = torch.device('cuda:{}'.format(CUDA_DEVICE_ID))  # 设置计算设备为指定的GPU
+
+    # 加载或创建模型
+    if model_pretrained:  # 如果有预训练模型
         print('Loading pretrained model from {}'.format(save_root_dir + '/' + model_pretrained + '/model.pth'))
         model = torch.load(save_root_dir + '/' + model_pretrained + '/model.pth', map_location=device)
-    else:
+    else:  # 如果没有预训练模型，创建新模型
         model = VSNet(num_classes=num_classes)
-        model = nn.DataParallel(model, device_ids=[0, 1, 2, 3])
+    if len(GPU_IDS) > 1:
+        model = nn.DataParallel(model, device_ids=GPU_IDS)  # 多GPU使用DataParallel
 
-    # criterion = nn.MSELoss(reduction='sum')
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    # optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
+    # criterion = nn.MSELoss(reduction='sum')  # 可选的损失函数
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)  # 使用Adam优化器
+    # optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)  # 可选的SGD优化器
 
-    model.to(device)
+    model.to(device)  # 将模型移动到GPU
 
-    scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+    scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)  # 创建学习率调度器
 
-    tb.configure(save_root_dir + '/' + model_name)
+    tb.configure(save_root_dir + '/' + model_name)  # 配置TensorBoard日志
 
-    start_time = time.time()
+    start_time = time.time()  # 记录开始时间
 
-    tb_count = 0
-    for epoch in range(num_epochs):
+    tb_count = 0  # TensorBoard计数器
+    start_epoch = 0  # 起始epoch
+    
+    # 检查是否从断点恢复训练
+    if resume_training:
+        if os.path.exists(checkpoint_path):
+            checkpoint = load_checkpoint(checkpoint_path, device)
+            
+            # 恢复模型状态
+            if hasattr(model, 'module'):
+                model.module.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # 恢复优化器状态
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # 恢复学习率调度器状态
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            # 恢复训练状态
+            start_epoch = checkpoint['epoch'] + 1  # 从下一个epoch开始
+            tb_count = checkpoint['tb_count']
+            
+            print('Resumed training from epoch {}'.format(start_epoch))
+        else:
+            print('Checkpoint file not found at {}. Starting from scratch.'.format(checkpoint_path))
+    
+    for epoch in range(start_epoch, num_epochs):  # 从起始epoch开始遍历
 
-        scheduler.step()
+        scheduler.step()  # 更新学习率
 
-        # Training
-        model.train()
-        running_loss = 0.0
-        for i, sample in enumerate(train_loader, 0):
-            if i == 1 and epoch == 0:
+        # Training - 训练阶段
+        model.train()  # 设置模型为训练模式
+        running_loss = 0.0  # 初始化累积损失
+        for i, sample in enumerate(train_loader, 0):  # 遍历训练数据
+            if i == 1 and epoch == 0:  # 从第二个batch开始计时，避免初始化影响
                 start_time = time.time()
-            img_a, img_b, label = sample
+            img_a, img_b, label = sample  # 获取图像对和标签
 
-            optimizer.zero_grad()
+            optimizer.zero_grad()  # 清零梯度
 
+            # 将数据移动到GPU
             img_a = img_a.to(device)
             img_b = img_b.to(device)
             label = label.to(device)
 
-            output = model(img_a, img_b)
+            output = model(img_a, img_b)  # 前向传播
 
-            loss = combined_loss_quat(output, label, weights=weights)
+            loss = combined_loss_quat(output, label, weights=weights)  # 计算损失
 
-            loss.backward()
+            loss.backward()  # 反向传播
 
-            optimizer.step()
+            optimizer.step()  # 更新参数
 
-            running_loss += loss.item() * output.shape[0]
+            running_loss += loss.item() * output.shape[0]  # 累积损失
 
+            # 将数据移回CPU用于计算误差
             output = output.cpu().detach().numpy()
             label = label.cpu().detach().numpy()
 
-            error = np.zeros(8)
+            error = np.zeros(8)  # 初始化误差数组
 
+            # 计算每个样本的误差
             for j in range(output.shape[0]):
+                # 平移误差(前3个元素)
                 error[:3] += np.abs(output[j, :3] - label[j, :3])
 
+                # 归一化四元数
                 quat_output = normalize_q(output[j, 3:])
                 quat_label = label[j, 3:]
 
+                # 将四元数转换为轴角表示
                 axis_output, angle_output = axis_angle_from_quat(quat_output)
                 axis_label, angle_label = axis_angle_from_quat(quat_label)
 
+                # 计算旋转角度误差
                 error_mag = np.abs(angle_output - angle_label)
-                error_mag = error_mag if error_mag < np.pi else error_mag - np.pi
+                error_mag = error_mag if error_mag < np.pi else error_mag - np.pi  # 处理角度环绕问题
+                # 计算旋转轴误差
                 error_dir = angle_between_vectors(axis_output, axis_label)
-                error[3] += np.nan_to_num(error_mag)
-                error[4] += np.nan_to_num(error_dir)
+                error[3] += np.nan_to_num(error_mag)  # 角度误差
+                error[4] += np.nan_to_num(error_dir)  # 轴误差
 
+                # 将四元数转换为欧拉角
                 rpy_output = np.array(euler_from_quaternion(quat_output))
                 rpy_label = np.array(euler_from_quaternion(quat_label))
+                # 计算欧拉角误差
                 error[5:] += np.abs(rpy_output - rpy_label)
 
+            # 计算平均误差
             error /= output.shape[0]
-            error[:3] *= 1000
-            error[3:] = np.rad2deg(error[3:])
+            error[:3] *= 1000  # 将平移误差从米转换为毫米
+            error[3:] = np.rad2deg(error[3:])  # 将角度误差从弧度转换为度
+            # 估算剩余时间
             est_time = (time.time() - start_time) / (epoch * len(train_loader) + i + 1) * (
                     num_epochs * len(train_loader))
             est_time = str(datetime.timedelta(seconds=est_time))
+            # 打印训练信息
             print(
                 '[TRAIN][{}][EST:{}] Epoch {}, Batch {}, Loss = {:0.7f}, error: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg,roll={:0.2f}deg,pitch={:0.2f}deg,yaw={:0.2f}deg'.format(
                     time.time() - start_time, est_time, epoch + 1, i + 1,
                     loss.item(), *error))
 
+            # 记录到TensorBoard
             tb.log_value(name='Loss', value=loss.item(), step=tb_count)
             tb.log_value(name='x/mm', value=error[0], step=tb_count)
             tb.log_value(name='y/mm', value=error[1], step=tb_count)
@@ -191,231 +316,290 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):
             tb.log_value(name='yaw/deg', value=error[7], step=tb_count)
             tb_count += 1
 
-        # Dev eval
-        model.eval()
-        with torch.no_grad():
-            running_error_dev = np.zeros(8)
-            # running_error_dev = np.zeros(2)
-            for i, sample in enumerate(dev_loader, 0):
-                img_a, img_b, label = sample
+        # Dev eval - 验证集评估
+        model.eval()  # 设置模型为评估模式，禁用dropout等训练时特有的层
+        with torch.no_grad():  # 禁用梯度计算，减少内存消耗并加速计算
+            running_error_dev = np.zeros(8)  # 初始化验证集累积误差数组
+            # running_error_dev = np.zeros(2)  # 可选：只计算部分误差
+            for i, sample in enumerate(dev_loader, 0):  # 遍历验证数据
+                img_a, img_b, label = sample  # 获取图像对和标签
 
+                # 将数据移动到GPU
                 img_a = img_a.to(device)
                 img_b = img_b.to(device)
 
-                output = model(img_a, img_b)
+                output = model(img_a, img_b)  # 前向传播，获取预测结果
 
+                # 将数据移回CPU用于计算误差
                 output = output.cpu().detach().numpy()
-
                 label = label.numpy()
 
-                error = np.zeros(8)
-                # error = np.zeros(2)
+                error = np.zeros(8)  # 初始化当前批次的误差数组
+                # error = np.zeros(2)  # 可选：只计算部分误差
 
+                # 计算每个样本的误差
                 for j in range(output.shape[0]):
+                    # 计算平移误差(前3个元素)
                     error[:3] += np.abs(output[j, :3] - label[j, :3])
 
+                    # 归一化四元数
                     quat_output = normalize_q(output[j, 3:])
                     quat_label = label[j, 3:]
 
+                    # 将四元数转换为轴角表示
                     axis_output, angle_output = axis_angle_from_quat(quat_output)
                     axis_label, angle_label = axis_angle_from_quat(quat_label)
 
+                    # 计算旋转角度误差
                     error_mag = np.abs(angle_output - angle_label)
-                    error_mag = error_mag if error_mag < np.pi else error_mag - np.pi
+                    error_mag = error_mag if error_mag < np.pi else error_mag - np.pi  # 处理角度环绕问题
+                    # 计算旋转轴误差
                     error_dir = angle_between_vectors(axis_output, axis_label)
-                    error[3] += np.nan_to_num(error_mag)
-                    error[4] += np.nan_to_num(error_dir)
+                    error[3] += np.nan_to_num(error_mag)  # 角度误差
+                    error[4] += np.nan_to_num(error_dir)  # 轴误差
 
+                    # 将四元数转换为欧拉角
                     rpy_output = np.array(euler_from_quaternion(quat_output))
                     rpy_label = np.array(euler_from_quaternion(quat_label))
+                    # 计算欧拉角误差
                     error[5:] += np.abs(rpy_output - rpy_label)
 
-                error[:3] *= 1000
-                error[3:] = np.rad2deg(error[3:])
+                # 转换单位
+                error[:3] *= 1000  # 将平移误差从米转换为毫米
+                error[3:] = np.rad2deg(error[3:])  # 将角度误差从弧度转换为度
 
-                running_error_dev += error
-                error /= output.shape[0]
+                running_error_dev += error  # 累积误差
+                error /= output.shape[0]  # 计算当前批次的平均误差
 
+                # 打印验证信息
                 print(
                     '[EVAL][{}] Epoch {}, Batch {}, error: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg'.format(
                         time.time() - start_time, epoch + 1, i + 1, *error))
 
-        average_loss = running_loss / train_size_aug
-        average_error = running_error_dev / dev_size_aug
+        # 计算平均损失和误差
+        average_loss = running_loss / train_size_aug  # 计算平均训练损失
+        average_error = running_error_dev / dev_size_aug  # 计算平均验证误差
+        # 打印总结信息
         print(
             '[SUMMARY][{}] Summary: Epoch {}, loss = {:0.7f}, dev_eval: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg,roll={:0.2f}deg,pitch={:0.2f}deg,yaw={:0.2f}deg\n\n'.format(
                 time.time() - start_time, epoch + 1, average_loss, *average_error))
 
-        tb.log_value(name='Dev loss', value=average_loss, step=epoch)
-        tb.log_value(name='Dev x/mm', value=average_error[0], step=epoch)
-        tb.log_value(name='Dev y/mm', value=average_error[1], step=epoch)
-        tb.log_value(name='Dev z/mm', value=average_error[2], step=epoch)
-        tb.log_value(name='Dev mag/deg', value=average_error[3], step=epoch)
-        tb.log_value(name='Dev dir/deg', value=average_error[4], step=epoch)
-        tb.log_value(name='Dev roll/deg', value=average_error[5], step=epoch)
-        tb.log_value(name='Dev pitch/deg', value=average_error[6], step=epoch)
-        tb.log_value(name='Dev yaw/deg', value=average_error[7], step=epoch)
+        # 记录到TensorBoard
+        tb.log_value(name='Dev loss', value=average_loss, step=epoch)  # 记录验证损失
+        tb.log_value(name='Dev x/mm', value=average_error[0], step=epoch)  # 记录x轴平移误差
+        tb.log_value(name='Dev y/mm', value=average_error[1], step=epoch)  # 记录y轴平移误差
+        tb.log_value(name='Dev z/mm', value=average_error[2], step=epoch)  # 记录z轴平移误差
+        tb.log_value(name='Dev mag/deg', value=average_error[3], step=epoch)  # 记录旋转角度误差
+        tb.log_value(name='Dev dir/deg', value=average_error[4], step=epoch)  # 记录旋转轴误差
+        tb.log_value(name='Dev roll/deg', value=average_error[5], step=epoch)  # 记录横滚角误差
+        tb.log_value(name='Dev pitch/deg', value=average_error[6], step=epoch)  # 记录俯仰角误差
+        tb.log_value(name='Dev yaw/deg', value=average_error[7], step=epoch)  # 记录偏航角误差
 
-        torch.save(model, save_root_dir + '/' + model_name + '/model.pth')
-        print('Model saved at {}/{}/model.pth'.format(save_root_dir, model_name))
+        # 保存模型
+        model_to_save = model.module if hasattr(model, 'module') else model
+        torch.save(model_to_save.state_dict(), save_root_dir + '/' + model_name + '/model.pth')  # 保存模型状态字典
+        print('Model saved at {}/{}/model.pth'.format(save_root_dir, model_name))  # 打印保存路径
+        
+        # 保存断点
+        if (epoch + 1) % checkpoint_interval == 0:
+            save_checkpoint(model, optimizer, scheduler, epoch, tb_count, checkpoint_path)
 
 
-def mode_eval(loader, size_aug):
-    # image checker
-    check_image = False
+def mode_eval(loader, size_aug):  # 评估模式函数
+    """
+    在指定数据集上评估模型性能
+    
+    参数:
+        loader: 数据加载器
+        size_aug: 数据集大小
+    """
+    # 图像检查器配置
+    check_image = False  # 是否检查错误图像
     if check_image:
-        xyz_thres = 3  # mm
-        rpy_thres = 2  # deg
-        paths = []  # for display of bad image pairs
+        xyz_thres = 3  # mm - 平移误差阈值
+        rpy_thres = 2  # deg - 旋转误差阈值
+        paths = []  # 用于存储错误图像对的路径
 
-    # accuracy-threshold curve
-    make_curve = True
+    # 精度-阈值曲线配置
+    make_curve = True  # 是否生成精度-阈值曲线
     if make_curve:
-        xyz_error_max = 10.0  # mm
-        xyz_error_reso = 0.01  # mm
-        rpy_error_max = 5.0  # deg
-        rpy_error_reso = 0.01  # deg
+        xyz_error_max = 10.0  # mm - 平移误差最大值
+        xyz_error_reso = 0.01  # mm - 平移误差分辨率
+        rpy_error_max = 5.0  # deg - 旋转误差最大值
+        rpy_error_reso = 0.01  # deg - 旋转误差分辨率
 
-    device = torch.device('cuda')
+    device = torch.device('cuda:{}'.format(CUDA_DEVICE_ID))  # 设置计算设备为指定的GPU
 
-    model = torch.load(save_root_dir + '/' + model_name + '/model.pth')
+    # 创建模型实例
+    model = VSNet(num_classes=num_classes)
+    
+    # 加载模型状态字典
+    model_state_dict = torch.load(save_root_dir + '/' + model_name + '/model.pth', map_location=device)
+    model.load_state_dict(model_state_dict)
 
-    model.eval()
-    model.to(device)
+    # 如果需要多GPU评估
+    if len(GPU_IDS) > 1:
+        model = nn.DataParallel(model, device_ids=GPU_IDS)
 
-    data = [[] for i in range(8)]  # for box plotting
-    running_error_test = np.zeros(8)
-    start_time = time.time()
-    for i, sample in enumerate(loader):
+    model.eval()  # 设置模型为评估模式
+    model.to(device)  # 将模型移动到GPU
 
+    data = [[] for i in range(8)]  # 用于箱线图的数据
+    running_error_test = np.zeros(8)  # 初始化测试集累积误差
+    start_time = time.time()  # 记录开始时间
+    for i, sample in enumerate(loader):  # 遍历测试数据
+
+        # 获取数据和路径
         img_a, img_b, label, img_a_path, img_b_path, label_a_path, label_b_path = sample
+        # 将数据移动到GPU
         img_a = img_a.to(device)
         img_b = img_b.to(device)
         label = label.to(device)
 
-        output = model(img_a, img_b)
+        output = model(img_a, img_b)  # 前向传播
+        # 将数据移回CPU用于计算误差
         output = output.cpu().detach().numpy()
         label = label.cpu().detach().numpy()
 
         # print('output = \n{}\nlabel = \n{}'.format(output, label))
 
-        error = np.zeros(8)
-        for j in range(output.shape[0]):
+        error = np.zeros(8)  # 初始化误差数组
+        for j in range(output.shape[0]):  # 遍历批次中的每个样本
 
             # print('{} vs {}'.format(output[j], label[j]))
 
+            # 计算平移误差(转换为毫米)
             xyz_error = np.abs(output[j, :3] - label[j, :3]) * 1000
             error[:3] += xyz_error
-            # error[:2] += np.abs(output[j, :2] - label[j, :2]
+            # error[:2] += np.abs(output[j, :2] - label[j, :2]  # 可选：只计算部分误差
+            # 归一化四元数
             quat_output = normalize_q(output[j, 3:])
             quat_label = label[j, 3:]
 
+            # 将四元数转换为轴角表示
             axis_output, angle_output = axis_angle_from_quat(quat_output)
             axis_label, angle_label = axis_angle_from_quat(quat_label)
 
             # print('output[j, 3] = {}, label[j, 3] = {}'.format(output[j, 3], label[j, 3]))
+            # 计算旋转角度误差
             error_mag = np.abs(angle_output - angle_label)
-            error_mag = error_mag if error_mag < np.pi else error_mag - np.pi
+            error_mag = error_mag if error_mag < np.pi else error_mag - np.pi  # 处理角度环绕问题
+            # 计算旋转轴误差
             error_dir = angle_between_vectors(axis_output, axis_label)
+            # 转换为度
             error_mag = np.rad2deg(np.nan_to_num(error_mag))
             error_dir = np.rad2deg(np.nan_to_num(error_dir))
-            error[3] += error_mag
-            error[4] += error_dir
+            error[3] += error_mag  # 角度误差
+            error[4] += error_dir  # 轴误差
 
+            # 将四元数转换为欧拉角
             rpy_output = np.array(euler_from_quaternion(quat_output))
             rpy_label = np.array(euler_from_quaternion(quat_label))
+            # 计算欧拉角误差并转换为度
             rpy_error = np.rad2deg(np.abs(rpy_output - rpy_label))
             error[5:] += rpy_error
 
-            data[0].append(xyz_error[0])
-            data[1].append(xyz_error[1])
-            data[2].append(xyz_error[2])
-            data[3].append(error_mag)
-            data[4].append(error_dir)
-            data[5].append(rpy_error[0])
-            data[6].append(rpy_error[1])
-            data[7].append(rpy_error[2])
+            # 收集数据用于箱线图
+            data[0].append(xyz_error[0])  # x轴平移误差
+            data[1].append(xyz_error[1])  # y轴平移误差
+            data[2].append(xyz_error[2])  # z轴平移误差
+            data[3].append(error_mag)  # 旋转角度误差
+            data[4].append(error_dir)  # 旋转轴误差
+            data[5].append(rpy_error[0])  # 横滚角误差
+            data[6].append(rpy_error[1])  # 俯仰角误差
+            data[7].append(rpy_error[2])  # 偏航角误差
 
+            # 图像检查器：收集错误图像对
             if check_image:
                 if np.any(xyz_error > xyz_thres) or np.any(rpy_error > rpy_thres):
                     checker_output = np.ones(8) * -1
-                    checker_output[:3] = output[j, :3] * 1000
-                    checker_output[5:] = np.rad2deg(rpy_output)
+                    checker_output[:3] = output[j, :3] * 1000  # 转换为毫米
+                    checker_output[5:] = np.rad2deg(rpy_output)  # 转换为度
 
                     checker_label = np.ones(8) * -1
-                    checker_label[:3] = label[j, :3] * 1000
-                    checker_label[5:] = np.rad2deg(rpy_label)
+                    checker_label[:3] = label[j, :3] * 1000  # 转换为毫米
+                    checker_label[5:] = np.rad2deg(rpy_label)  # 转换为度
 
                     paths.append((img_a_path[j], img_b_path[j], checker_output, checker_label, error))
 
-        running_error_test += error
-        error /= output.shape[0]
+        running_error_test += error  # 累积误差
+        error /= output.shape[0]  # 计算平均误差
 
+        # 打印评估信息
         print(
             '[EVAL][{}] Batch {}, error: x={}mm,y={}mm,z={}mm,mag={}deg,dir={}deg,roll={}deg,pitch={}deg,yaw={}deg'.format(
                 time.time() - start_time, i + 1, *error))
 
+    # 计算平均误差
     average_error = running_error_test / test_size_aug
     print(
         'Summary: test_eval: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg,roll={:0.2f}deg,pitch={:0.2f}deg,yaw={:0.2f}deg\n\n'.format(
         *average_error))
+    
+    # 创建误差分布箱线图
     fig1 = plt.figure(0)
-    ax11 = fig1.add_subplot(121)
+    ax11 = fig1.add_subplot(121)  # 左子图：平移误差
     ax11.set_title('Translation Errors (mm)')
-    bp11 = ax11.boxplot(data[:3])
+    bp11 = ax11.boxplot(data[:3])  # 绘制x,y,z平移误差的箱线图
     ax11.set_xticklabels(['x', 'y', 'z'])
-    # only show max and min outlier
+    # 只显示最大异常值
     for outliers in bp11['fliers']:
-        # outliers.set_data([[outliers.get_xdata()[0],outliers.get_xdata()[0]],[np.min(outliers.get_ydata()),‌​np.max(outliers.get_ydata())]])
         outliers.set_data([[outliers.get_xdata()[0]], [[np.max(outliers.get_ydata())]]])
 
-    ax12 = fig1.add_subplot(122)
+    ax12 = fig1.add_subplot(122)  # 右子图：旋转误差
     ax12.set_title('Rotation Errors (deg)')
-    bp12 = ax12.boxplot(data[5:])
+    bp12 = ax12.boxplot(data[5:])  # 绘制roll,pitch,yaw旋转误差的箱线图
     ax12.set_xticklabels(['roll', 'pitch', 'yaw'])
-    # only show max and min outlier
+    # 只显示最大异常值
     for outliers in bp12['fliers']:
-        # outliers.set_data([[outliers.get_xdata()[0],outliers.get_xdata()[0]],[np.min(outliers.get_ydata()),‌​np.max(outliers.get_ydata())]])
         outliers.set_data([[outliers.get_xdata()[0]], [[np.max(outliers.get_ydata())]]])
 
-    plt.savefig(save_root_dir + '/' + model_name + '/error_distribution.png')
-    plt.show()
+    plt.savefig(save_root_dir + '/' + model_name + '/error_distribution.png')  # 保存误差分布图
+    plt.show()  # 显示图像
 
+    # 图像检查器：可视化错误图像对
     if check_image:
-        idx = 0
-        idx_prev = -1
-        print(len(paths))
-        while paths:
+        idx = 0  # 当前图像索引
+        idx_prev = -1  # 上一个图像索引
+        print(len(paths))  # 打印错误图像对数量
+        while paths:  # 循环直到用户退出
 
-            if idx is not idx_prev:
+            if idx is not idx_prev:  # 如果索引改变
                 idx_prev = idx
 
+                # 打印图像信息和误差
                 print('img_a: {}, img_b: {}'.format(get_stem(paths[idx][0]), get_stem(paths[idx][1])))
                 print('output: {}\nlabel: {}\nerror:{}'.format(paths[idx][2], paths[idx][3], paths[idx][4]))
 
+                # 加载图像
                 img_a = cv2.imread(paths[idx][0])
                 img_b = cv2.imread(paths[idx][1])
 
+            # 显示图像
             cv2.imshow('a', img_a)
             cv2.imshow('b', img_b)
 
+            # 等待用户按键
             key = cv2.waitKeyEx(0)
 
-            if key == 97:  # a
+            if key == 97:  # a键：上一张图像
                 idx -= 1
                 idx = max(idx, 0)
-            elif key == 100:  # d
+            elif key == 100:  # d键：下一张图像
                 idx += 1
                 idx = min(idx, len(paths) - 1)
-            elif key == 27:  # exit
+            elif key == 27:  # ESC键：退出
                 break
             else:
                 print('Unknown key: {}'.format(key))
 
+    # 生成精度-阈值曲线
     if make_curve:
+        # 创建阈值列表
         xyz_thres_list = list(np.arange(0, xyz_error_max, xyz_error_reso))
         rpy_thres_list = list(np.arange(0, rpy_error_max, rpy_error_reso))
 
+        # 计算每个误差维度的精度-阈值曲线
         x_accuracy_list, x_thres_list = accuracy_thres_curve(data[0], xyz_thres_list)
         y_accuracy_list, y_thres_list = accuracy_thres_curve(data[1], xyz_thres_list)
         z_accuracy_list, z_thres_list = accuracy_thres_curve(data[2], xyz_thres_list)
@@ -423,8 +607,9 @@ def mode_eval(loader, size_aug):
         pi_accuracy_list, pi_thres_list = accuracy_thres_curve(data[6], rpy_thres_list)
         ya_accuracy_list, ya_thres_list = accuracy_thres_curve(data[7], rpy_thres_list)
 
+        # 创建精度-阈值曲线图
         fig2 = plt.figure()
-        ax21 = fig2.add_subplot(211)
+        ax21 = fig2.add_subplot(211)  # 上子图：平移误差
         ax21.set_xlabel('Threshold (mm)')
         ax21.set_ylabel('Fraction of pass')
         lines21 = ax21.plot(x_thres_list, x_accuracy_list, 'r-', y_thres_list, y_accuracy_list, 'g-', z_thres_list,
@@ -432,7 +617,7 @@ def mode_eval(loader, size_aug):
         ax21.set_xticks(np.arange(min(x_thres_list), max(x_thres_list) + 1, 1.0))
         ax21.legend(lines21, ('x', 'y', 'z'))
 
-        ax22 = fig2.add_subplot(212)
+        ax22 = fig2.add_subplot(212)  # 下子图：旋转误差
         ax22.set_xlabel('Threshold (deg)')
         ax22.set_ylabel('Fraction of pass')
         lines22 = ax22.plot(ro_thres_list, ro_accuracy_list, 'r-', pi_thres_list, pi_accuracy_list, 'g-', ya_thres_list,
@@ -440,36 +625,38 @@ def mode_eval(loader, size_aug):
         ax22.set_xticks(np.arange(min(ro_thres_list), max(ro_thres_list) + 1, 0.5))
         ax22.legend(lines22, ('roll', 'pitch', 'yaw'))
 
-        plt.tight_layout()
-        plt.savefig(save_root_dir + '/' + model_name + '/error_curve.png')
-        plt.show()
+        plt.tight_layout()  # 调整布局
+        plt.savefig(save_root_dir + '/' + model_name + '/error_curve.png')  # 保存精度-阈值曲线
+        plt.show()  # 显示图像
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # 主程序入口
 
-    if mode[0] == 'train':
+    if mode[0] == 'train':  # 如果是训练模式
 
+        # 准备数据加载器（不需要返回路径）
         train_loader, dev_loader, test_loader, train_size_aug, dev_size_aug, test_size_aug = prepare_loaders(
             return_path=False)
 
-        if mode[1] == 'train':
+        if mode[1] == 'train':  # 训练训练集
             mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug)
         else:
-            raise Exception('Cannot train ' + mode[1] + ' set.')
+            raise Exception('Cannot train ' + mode[1] + ' set.')  # 不支持训练其他数据集
 
-    elif mode[0] == 'eval':
+    elif mode[0] == 'eval':  # 如果是评估模式
 
+        # 准备数据加载器（需要返回路径用于可视化）
         train_loader, dev_loader, test_loader, train_size_aug, dev_size_aug, test_size_aug = prepare_loaders(
             return_path=True)
 
-        if mode[1] == 'train':
+        if mode[1] == 'train':  # 评估训练集
             mode_eval(train_loader, train_size_aug)
-        elif mode[1] == 'dev':
+        elif mode[1] == 'dev':  # 评估验证集
             mode_eval(dev_loader, dev_size_aug)
-        elif mode[1] == 'test':
+        elif mode[1] == 'test':  # 评估测试集
             mode_eval(test_loader, test_size_aug)
         else:
-            raise Exception('Cannot eval ' + mode[1] + ' set.')
+            raise Exception('Cannot eval ' + mode[1] + ' set.')  # 不支持评估其他数据集
 
     else:
-        raise Exception('Unknown mode ' + mode[0])
+        raise Exception('Unknown mode ' + mode[0])  # 不支持的模式
