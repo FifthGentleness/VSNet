@@ -5,8 +5,15 @@ import numpy as np  # 导入NumPy库，用于数值计算
 import torch  # 导入PyTorch深度学习框架
 from torch.utils.data import Dataset, DataLoader  # 导入PyTorch的数据集和数据加载器类
 from torchvision import transforms  # 导入PyTorch的图像变换模块
-from utils import get_files, get_stem, tf_to_dof, tf_to_quat  # 从自定义工具模块导入辅助函数
-import transformations as tr  # 导入变换处理模块
+from utils import get_files, get_stem  # 从自定义工具模块导入辅助函数
+
+
+def load_xy_label(label_path):
+    """读取标签文件中的二维数值标签。"""
+    label = np.loadtxt(label_path, dtype=np.float32)
+    label = np.asarray(label, dtype=np.float32).reshape(-1)
+    assert label.size >= 2, 'Label file {} must contain at least two values'.format(label_path)
+    return label[:2]
 
 
 def generate_set_paths(img_paths, label_paths, aug_factor=None, limits=None, weights=[1/2, 1/2]):  # 生成数据集路径对的函数
@@ -36,16 +43,12 @@ def generate_set_paths(img_paths, label_paths, aug_factor=None, limits=None, wei
                 '{} and {} should have the same stem!'.format(img_b_path, label_b_path)  # 确保图像和标签文件名相同
 
             if limits is not None:  # 如果指定了偏差限制
-                tf_a = np.loadtxt(label_a_path, dtype=np.float32)  # 加载第一个变换矩阵
-                tf_b = np.loadtxt(label_b_path, dtype=np.float32)  # 加载第二个变换矩阵
+                label_a = load_xy_label(label_a_path)
+                label_b = load_xy_label(label_b_path)
+                label = label_a - label_b
 
-                tf_ba = np.matmul(np.linalg.inv(tf_b), tf_a)  # take a as reference - 计算相对变换，以a为参考
-                label = np.array(tf_to_quat(tf_ba), dtype=np.float32)  # 将变换矩阵转换为四元数
-
-                trans_deviation = np.sqrt(np.mean((label[:3]) ** 2))  # 计算平移偏差
-                quat_deviation = np.sqrt(np.mean((label[3:] - np.array([1.0, 0.0, 0.0, 0.0])) ** 2))  # 计算四元数偏差
-
-                if weights[0] * trans_deviation + weights[1] * quat_deviation > limits:  # 如果加权偏差超过限制
+                weighted_deviation = weights[0] * np.abs(label[0]) + weights[1] * np.abs(label[1])
+                if weighted_deviation > limits:  # 如果加权偏差超过限制
                     continue  # skip this example - 跳过这个样本
 
             set_paths.append((img_a_path, img_b_path, label_a_path, label_b_path))  # 添加路径对到列表
@@ -162,11 +165,9 @@ class VSDataset(Dataset):  # 视觉里程计数据集类
 
         img_a = Image.open(img_a_path)  # 打开第一张图像
         img_b = Image.open(img_b_path)  # 打开第二张图像
-        tf_a = np.loadtxt(label_a_path, dtype=np.float32)  # 加载第一个变换矩阵
-        tf_b = np.loadtxt(label_b_path, dtype=np.float32)  # 加载第二个变换矩阵
-
-        tf_ab = np.matmul(np.linalg.inv(tf_b), tf_a)  # take a as reference - 计算相对变换，以a为参考
-        label = np.array(tf_to_quat(tf_ab), dtype=np.float32)  # 将变换矩阵转换为四元数
+        label_a = load_xy_label(label_a_path)
+        label_b = load_xy_label(label_b_path)
+        label = label_a - label_b
 
         img_a = self.img_transform(img_a)  # 应用图像变换
         img_b = self.img_transform(img_b)  # 应用图像变换

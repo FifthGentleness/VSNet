@@ -2,7 +2,6 @@ import torch  # 导入PyTorch深度学习框架
 import torchvision  # 导入PyTorch的计算机视觉模块
 import os  # 导入操作系统相关功能的模块
 import numpy as np  # 导入NumPy库，用于数值计算
-from utils import tf_to_dof, tf_to_quat  # 从自定义工具模块导入变换相关函数
 from torchvision import transforms  # 导入PyTorch的图像变换模块
 from PIL import Image  # 从PIL库导入Image模块，用于图像处理
 
@@ -40,6 +39,14 @@ class VSNet(object):  # VSNet视觉里程计网络类
         return np.array(output[0])  # 返回第一个（也是唯一一个）样本的输出
 
 
+def load_xy_label(label_path):
+    """读取标签文件中的二维数值标签。"""
+    label = np.loadtxt(label_path, dtype=np.float32)
+    label = np.asarray(label, dtype=np.float32).reshape(-1)
+    assert label.size >= 2, 'Label file {} must contain at least two values'.format(label_path)
+    return label[:2]
+
+
 def main():  # 主函数
     model = './model.pth'  # 模型文件路径
     img_a = './test_img/image_a.png'  # 第一张测试图像路径
@@ -50,12 +57,11 @@ def main():  # 主函数
     end = torch.cuda.Event(enable_timing=True)  # 创建CUDA计时结束事件
 
 
-    tf_a = np.loadtxt(label_a_path, dtype=np.float32)  # 加载第一个变换矩阵
-    tf_b = np.loadtxt(label_b_path, dtype=np.float32)  # 加载第二个变换矩阵
-    tf_ba = np.matmul(np.linalg.inv(tf_b), tf_a)  # 计算相对变换，以b为参考
-    label = np.array(tf_to_quat(tf_ba), dtype=np.float32)  # 将变换矩阵转换为四元数
+    label_a = load_xy_label(label_a_path)
+    label_b = load_xy_label(label_b_path)
+    label = label_a - label_b
 
-    net = DeepVSNet(model)  # 创建VSNet网络实例（注意：这里类名与上面定义的VSNet不一致）
+    net = VSNet(model)  # 创建VSNet网络实例
 
     start.record()  # 开始计时
 

@@ -2,6 +2,12 @@ import torch  # 导入PyTorch深度学习框架
 import torch.nn as nn  # 导入PyTorch的神经网络模块
 import torchvision.models as models  # 导入PyTorch的预训练模型模块
 
+def loss_xy(output, target):  # 四元数损失函数，只考虑平移部分xy
+    # compute rmse for translation - 计算平移部分的均方根误差
+    trans_rmse = torch.sqrt(torch.mean((output[:, :2] - target[:, :2]) ** 2, dim=1))  # 计算平移误差的均方根
+
+    return torch.mean(trans_rmse)  # 返回平移误差的平均值
+
 
 def loss_quat(output, target):  # 四元数损失函数，只考虑平移部分
     # compute rmse for translation - 计算平移部分的均方根误差
@@ -61,7 +67,7 @@ class VSNet(nn.Module):  # VSNet视觉里程计网络类
         super(VSNet, self).__init__()  # 调用父类初始化
         self.caffenet = models.alexnet(pretrained=True)  # 加载预训练的AlexNet模型
 
-        self.caffenet.classifier[1] = nn.Linear(14 * 19 * 96 * 2, 4096)  # 修改分类器的第一层全连接层
+        self.caffenet.classifier[1] = nn.Linear(31 * 39 * 96 * 2, 4096)  # 修改分类器的第一层全连接层
         self.caffenet.classifier[-1] = nn.Linear(4096, 1024)  # 修改分类器的最后一层全连接层
         self.channelRed = nn.Conv2d(256, 96, 1)  # 通道减少层，将256通道减少到96通道
         self.output = nn.Sequential(  # 输出层序列
@@ -83,11 +89,11 @@ class VSNet(nn.Module):  # VSNet视觉里程计网络类
         # 256--96--14*19*96
         a = self.caffenet.features(a)  # 第一张图像通过特征提取器
         a = self.channelRed(a)  # 减少通道数
-        a = a.view(a.size(0), 14 * 19 * 96)  # 展平特征
-
+        a = a.view(a.size(0), -1)  # 展平特征
+    
         b = self.caffenet.features(b)  # 第二张图像通过特征提取器
         b = self.channelRed(b)  # 减少通道数
-        b = b.view(b.size(0), 14 * 19 * 96)  # 展平特征
+        b = b.view(b.size(0), -1)  # 展平特征
 
         # 14 * 19 * 96 * 2 = 51,072
         concat = torch.cat((a, b), 1)  # 连接两张图像的特征

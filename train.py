@@ -13,28 +13,19 @@ from torch.utils.data import DataLoader  # 导入数据加载器
 import tensorboard_logger as tb  # 导入TensorBoard日志记录器
 
 import dataset  # 导入自定义数据集模块
-from model import VSNet, combined_loss_quat  # 从模型模块导入VSNet类和组合损失函数
+from model import VSNet, loss_xy  # 从模型模块导入VSNet类和组合损失函数
 from utils import check_dir, axis_angle_from_quat, normalize_q, get_stem, accuracy_thres_curve  # 导入工具函数
 from transformations import angle_between_vectors, euler_from_quaternion  # 导入变换相关函数
 
 # 模型配置参数
-model_name = 'VSNet-M8-900train'  # 模型名称
+model_name = 'VSNet-AF-400train'  # 模型名称
 model_pretrained = None  # 预训练模型路径，None表示不使用预训练
-num_classes = 7  # 输出类别数，6DOF位姿(3平移+3旋转)加1个额外参数
+num_classes = 2  # 输出类别数，X和Y
 
 # 数据集配置参数
-root_dir = './VSNet_Dataset'  # 数据根目录
-pattern = 'six_dof_1cm5deg_'  # 数据集模式，表示六自由度误差在1cm和5度范围内
-set_list = [ # 可选数据集列表（已注释）
- 'A1',
- 'A3',
- 'B1',
- 'B2',
- 'B3',
- 'C1',
- 'C2',
- 'C3']
-#set_list = ['rotate']  # 使用的数据集列表，这里只使用旋转数据集
+root_dir = './AngFeng_Dataset'  # 数据根目录
+pattern = 'camera'  # 数据集模式，表示六自由度误差在1cm和5度范围内
+set_list = ['1'] # 数据集列表，可以包含多个数据集如['1', '2', '3']
 
 # 构建图像和标签目录列表
 img_dir_list = [root_dir + '/' + pattern + my_set + '/img' for my_set in set_list]  # 图像目录列表
@@ -43,12 +34,12 @@ label_dir_list = [root_dir + '/' + pattern + my_set + '/label' for my_set in set
 # 保存配置参数
 save_root_dir = './results'  # 保存根目录
 log_name = save_root_dir + '/' + model_name + '/' + 'log.txt'  # 日志文件路径
-img_size = (640, 480)  # 输入图像尺寸
+img_size = (1280, 1024)  # 输入图像尺寸
 
 # 数据集大小配置
-train_size_list = [900] * len(set_list)  # 每个数据集的训练样本数量
-dev_size_list = [50] * len(set_list)  # 每个数据集的验证样本数量
-test_size_list = [50] * len(set_list)  # 每个数据集的测试样本数量
+train_size_list = [360] * len(set_list)  # 每个数据集的训练样本数量
+dev_size_list = [20] * len(set_list)  # 每个数据集的验证样本数量
+test_size_list = [20] * len(set_list)  # 每个数据集的测试样本数量
 
 # 训练配置参数
 num_epochs = 10  # 训练轮数
@@ -64,7 +55,7 @@ gamma = 0.5  # 学习率衰减倍数
 momentum = 0.9  # 动量参数
 # gamma = 0.3  # 可选的学习率衰减倍数
 limits = None  # 偏差限制，None表示不限制
-weights = [0.99, 0.01]  # 损失权重，平移和旋转的权重分配
+weights = [1, 0]  # 损失权重，平移和旋转的权重分配
 
 # 运行模式配置
 mode = ('train', 'train')  # 运行模式：训练训练集
@@ -249,7 +240,7 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
 
             output = model(img_a, img_b)  # 前向传播
 
-            loss = combined_loss_quat(output, label, weights=weights)  # 计算损失
+            loss = loss_xy(output, label)  # 计算损失
 
             loss.backward()  # 反向传播
 
@@ -261,46 +252,22 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
             output = output.cpu().detach().numpy()
             label = label.cpu().detach().numpy()
 
-            error = np.zeros(8)  # 初始化误差数组
+            error = np.zeros(2)  # 初始化误差数组
 
             # 计算每个样本的误差
             for j in range(output.shape[0]):
-                # 平移误差(前3个元素)
-                error[:3] += np.abs(output[j, :3] - label[j, :3])
-
-                # 归一化四元数
-                quat_output = normalize_q(output[j, 3:])
-                quat_label = label[j, 3:]
-
-                # 将四元数转换为轴角表示
-                axis_output, angle_output = axis_angle_from_quat(quat_output)
-                axis_label, angle_label = axis_angle_from_quat(quat_label)
-
-                # 计算旋转角度误差
-                error_mag = np.abs(angle_output - angle_label)
-                error_mag = error_mag if error_mag < np.pi else error_mag - np.pi  # 处理角度环绕问题
-                # 计算旋转轴误差
-                error_dir = angle_between_vectors(axis_output, axis_label)
-                error[3] += np.nan_to_num(error_mag)  # 角度误差
-                error[4] += np.nan_to_num(error_dir)  # 轴误差
-
-                # 将四元数转换为欧拉角
-                rpy_output = np.array(euler_from_quaternion(quat_output))
-                rpy_label = np.array(euler_from_quaternion(quat_label))
-                # 计算欧拉角误差
-                error[5:] += np.abs(rpy_output - rpy_label)
+                # 平移误差(前2个元素)
+                error[:2] += np.abs(output[j, :2] - label[j, :2])
 
             # 计算平均误差
             error /= output.shape[0]
-            error[:3] *= 1000  # 将平移误差从米转换为毫米
-            error[3:] = np.rad2deg(error[3:])  # 将角度误差从弧度转换为度
             # 估算剩余时间
             est_time = (time.time() - start_time) / (epoch * len(train_loader) + i + 1) * (
                     num_epochs * len(train_loader))
             est_time = str(datetime.timedelta(seconds=est_time))
             # 打印训练信息
             print(
-                '[TRAIN][{}][EST:{}] Epoch {}, Batch {}, Loss = {:0.7f}, error: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg,roll={:0.2f}deg,pitch={:0.2f}deg,yaw={:0.2f}deg'.format(
+                '[TRAIN][{}][EST:{}] Epoch {}, Batch {}, Loss = {:0.7f}, error: x={:0.2f}mm,y={:0.2f}mm'.format(
                     time.time() - start_time, est_time, epoch + 1, i + 1,
                     loss.item(), *error))
 
@@ -308,18 +275,12 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
             tb.log_value(name='Loss', value=loss.item(), step=tb_count)
             tb.log_value(name='x/mm', value=error[0], step=tb_count)
             tb.log_value(name='y/mm', value=error[1], step=tb_count)
-            tb.log_value(name='z/mm', value=error[2], step=tb_count)
-            tb.log_value(name='mag/deg', value=error[3], step=tb_count)
-            tb.log_value(name='dir/deg', value=error[4], step=tb_count)
-            tb.log_value(name='roll/deg', value=error[5], step=tb_count)
-            tb.log_value(name='pitch/deg', value=error[6], step=tb_count)
-            tb.log_value(name='yaw/deg', value=error[7], step=tb_count)
             tb_count += 1
 
         # Dev eval - 验证集评估
         model.eval()  # 设置模型为评估模式，禁用dropout等训练时特有的层
         with torch.no_grad():  # 禁用梯度计算，减少内存消耗并加速计算
-            running_error_dev = np.zeros(8)  # 初始化验证集累积误差数组
+            running_error_dev = np.zeros(2)  # 初始化验证集累积误差数组
             # running_error_dev = np.zeros(2)  # 可选：只计算部分误差
             for i, sample in enumerate(dev_loader, 0):  # 遍历验证数据
                 img_a, img_b, label = sample  # 获取图像对和标签
@@ -334,39 +295,13 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
                 output = output.cpu().detach().numpy()
                 label = label.numpy()
 
-                error = np.zeros(8)  # 初始化当前批次的误差数组
+                error = np.zeros(2)  # 初始化当前批次的误差数组
                 # error = np.zeros(2)  # 可选：只计算部分误差
 
                 # 计算每个样本的误差
                 for j in range(output.shape[0]):
-                    # 计算平移误差(前3个元素)
-                    error[:3] += np.abs(output[j, :3] - label[j, :3])
-
-                    # 归一化四元数
-                    quat_output = normalize_q(output[j, 3:])
-                    quat_label = label[j, 3:]
-
-                    # 将四元数转换为轴角表示
-                    axis_output, angle_output = axis_angle_from_quat(quat_output)
-                    axis_label, angle_label = axis_angle_from_quat(quat_label)
-
-                    # 计算旋转角度误差
-                    error_mag = np.abs(angle_output - angle_label)
-                    error_mag = error_mag if error_mag < np.pi else error_mag - np.pi  # 处理角度环绕问题
-                    # 计算旋转轴误差
-                    error_dir = angle_between_vectors(axis_output, axis_label)
-                    error[3] += np.nan_to_num(error_mag)  # 角度误差
-                    error[4] += np.nan_to_num(error_dir)  # 轴误差
-
-                    # 将四元数转换为欧拉角
-                    rpy_output = np.array(euler_from_quaternion(quat_output))
-                    rpy_label = np.array(euler_from_quaternion(quat_label))
-                    # 计算欧拉角误差
-                    error[5:] += np.abs(rpy_output - rpy_label)
-
-                # 转换单位
-                error[:3] *= 1000  # 将平移误差从米转换为毫米
-                error[3:] = np.rad2deg(error[3:])  # 将角度误差从弧度转换为度
+                    # 计算平移误差(前2个元素)
+                    error[:2] += np.abs(output[j, :2] - label[j, :2])
 
                 running_error_dev += error  # 累积误差
                 error /= output.shape[0]  # 计算当前批次的平均误差
@@ -381,25 +316,26 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
         average_error = running_error_dev / dev_size_aug  # 计算平均验证误差
         # 打印总结信息
         print(
-            '[SUMMARY][{}] Summary: Epoch {}, loss = {:0.7f}, dev_eval: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg,roll={:0.2f}deg,pitch={:0.2f}deg,yaw={:0.2f}deg\n\n'.format(
+            '[SUMMARY][{}] Summary: Epoch {}, loss = {:0.7f}, dev_eval: x={:0.2f}mm,y={:0.2f}mm\n\n'.format(
                 time.time() - start_time, epoch + 1, average_loss, *average_error))
 
         # 记录到TensorBoard
         tb.log_value(name='Dev loss', value=average_loss, step=epoch)  # 记录验证损失
         tb.log_value(name='Dev x/mm', value=average_error[0], step=epoch)  # 记录x轴平移误差
         tb.log_value(name='Dev y/mm', value=average_error[1], step=epoch)  # 记录y轴平移误差
-        tb.log_value(name='Dev z/mm', value=average_error[2], step=epoch)  # 记录z轴平移误差
-        tb.log_value(name='Dev mag/deg', value=average_error[3], step=epoch)  # 记录旋转角度误差
-        tb.log_value(name='Dev dir/deg', value=average_error[4], step=epoch)  # 记录旋转轴误差
-        tb.log_value(name='Dev roll/deg', value=average_error[5], step=epoch)  # 记录横滚角误差
-        tb.log_value(name='Dev pitch/deg', value=average_error[6], step=epoch)  # 记录俯仰角误差
-        tb.log_value(name='Dev yaw/deg', value=average_error[7], step=epoch)  # 记录偏航角误差
-
+    
         # 保存模型
         model_to_save = model.module if hasattr(model, 'module') else model
         torch.save(model_to_save.state_dict(), save_root_dir + '/' + model_name + '/model.pth')  # 保存模型状态字典
         print('Model saved at {}/{}/model.pth'.format(save_root_dir, model_name))  # 打印保存路径
         
+        # 保存loss和error数据为txt文件
+        results_dir = save_root_dir + '/' + model_name
+        with open(results_dir + '/training_log.txt', 'a') as f:
+            f.write('Epoch {}, Loss = {:0.7f}, Dev Error: x={:0.2f}mm, y={:0.2f}mm\n'.format(
+                epoch + 1, average_loss, average_error[0], average_error[1]))
+        print('Training log saved at {}/training_log.txt'.format(results_dir))
+ 
         # 保存断点
         if (epoch + 1) % checkpoint_interval == 0:
             save_checkpoint(model, optimizer, scheduler, epoch, tb_count, checkpoint_path)
@@ -413,20 +349,12 @@ def mode_eval(loader, size_aug):  # 评估模式函数
         loader: 数据加载器
         size_aug: 数据集大小
     """
-    # 图像检查器配置
-    check_image = False  # 是否检查错误图像
-    if check_image:
-        xyz_thres = 3  # mm - 平移误差阈值
-        rpy_thres = 2  # deg - 旋转误差阈值
-        paths = []  # 用于存储错误图像对的路径
 
     # 精度-阈值曲线配置
     make_curve = True  # 是否生成精度-阈值曲线
     if make_curve:
-        xyz_error_max = 10.0  # mm - 平移误差最大值
-        xyz_error_reso = 0.01  # mm - 平移误差分辨率
-        rpy_error_max = 5.0  # deg - 旋转误差最大值
-        rpy_error_reso = 0.01  # deg - 旋转误差分辨率
+        xy_error_max = 10.0  # mm - 平移误差最大值
+        xy_error_reso = 0.01  # mm - 平移误差分辨率
 
     device = torch.device('cuda:{}'.format(CUDA_DEVICE_ID))  # 设置计算设备为指定的GPU
 
@@ -469,166 +397,71 @@ def mode_eval(loader, size_aug):  # 评估模式函数
             # print('{} vs {}'.format(output[j], label[j]))
 
             # 计算平移误差(转换为毫米)
-            xyz_error = np.abs(output[j, :3] - label[j, :3]) * 1000
-            error[:3] += xyz_error
-            # error[:2] += np.abs(output[j, :2] - label[j, :2]  # 可选：只计算部分误差
-            # 归一化四元数
-            quat_output = normalize_q(output[j, 3:])
-            quat_label = label[j, 3:]
-
-            # 将四元数转换为轴角表示
-            axis_output, angle_output = axis_angle_from_quat(quat_output)
-            axis_label, angle_label = axis_angle_from_quat(quat_label)
-
-            # print('output[j, 3] = {}, label[j, 3] = {}'.format(output[j, 3], label[j, 3]))
-            # 计算旋转角度误差
-            error_mag = np.abs(angle_output - angle_label)
-            error_mag = error_mag if error_mag < np.pi else error_mag - np.pi  # 处理角度环绕问题
-            # 计算旋转轴误差
-            error_dir = angle_between_vectors(axis_output, axis_label)
-            # 转换为度
-            error_mag = np.rad2deg(np.nan_to_num(error_mag))
-            error_dir = np.rad2deg(np.nan_to_num(error_dir))
-            error[3] += error_mag  # 角度误差
-            error[4] += error_dir  # 轴误差
-
-            # 将四元数转换为欧拉角
-            rpy_output = np.array(euler_from_quaternion(quat_output))
-            rpy_label = np.array(euler_from_quaternion(quat_label))
-            # 计算欧拉角误差并转换为度
-            rpy_error = np.rad2deg(np.abs(rpy_output - rpy_label))
-            error[5:] += rpy_error
-
+            xy_error = np.abs(output[j, :2] - label[j, :2])
+            error[:2] += xy_error
+         
             # 收集数据用于箱线图
-            data[0].append(xyz_error[0])  # x轴平移误差
-            data[1].append(xyz_error[1])  # y轴平移误差
-            data[2].append(xyz_error[2])  # z轴平移误差
-            data[3].append(error_mag)  # 旋转角度误差
-            data[4].append(error_dir)  # 旋转轴误差
-            data[5].append(rpy_error[0])  # 横滚角误差
-            data[6].append(rpy_error[1])  # 俯仰角误差
-            data[7].append(rpy_error[2])  # 偏航角误差
-
-            # 图像检查器：收集错误图像对
-            if check_image:
-                if np.any(xyz_error > xyz_thres) or np.any(rpy_error > rpy_thres):
-                    checker_output = np.ones(8) * -1
-                    checker_output[:3] = output[j, :3] * 1000  # 转换为毫米
-                    checker_output[5:] = np.rad2deg(rpy_output)  # 转换为度
-
-                    checker_label = np.ones(8) * -1
-                    checker_label[:3] = label[j, :3] * 1000  # 转换为毫米
-                    checker_label[5:] = np.rad2deg(rpy_label)  # 转换为度
-
-                    paths.append((img_a_path[j], img_b_path[j], checker_output, checker_label, error))
+            data[0].append(xy_error[0])  # x轴平移误差
+            data[1].append(xy_error[1])  # y轴平移误差
 
         running_error_test += error  # 累积误差
         error /= output.shape[0]  # 计算平均误差
 
         # 打印评估信息
         print(
-            '[EVAL][{}] Batch {}, error: x={}mm,y={}mm,z={}mm,mag={}deg,dir={}deg,roll={}deg,pitch={}deg,yaw={}deg'.format(
+            '[EVAL][{}] Batch {}, error: x={:0.2f}mm,y={:0.2f}mm'.format(
                 time.time() - start_time, i + 1, *error))
 
     # 计算平均误差
     average_error = running_error_test / test_size_aug
     print(
-        'Summary: test_eval: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg,roll={:0.2f}deg,pitch={:0.2f}deg,yaw={:0.2f}deg\n\n'.format(
+        'Summary: test_eval: x={:0.2f}mm,y={:0.2f}mm\n\n'.format(
         *average_error))
+        
+    # 保存测试结果到txt文件
+    results_dir = save_root_dir + '/' + model_name
+    with open(results_dir + '/test_results.txt', 'w') as f:
+        f.write('Test Results Summary\n')
+        f.write('===================\n')
+        f.write('Test size: {}\n'.format(test_size_aug))
+        f.write('Average Error: x={:0.2f}mm, y={:0.2f}mm\n'.format(average_error[0], average_error[1]))
+    print('Test results saved at {}/test_results.txt'.format(results_dir))
     
+        
     # 创建误差分布箱线图
     fig1 = plt.figure(0)
     ax11 = fig1.add_subplot(121)  # 左子图：平移误差
     ax11.set_title('Translation Errors (mm)')
-    bp11 = ax11.boxplot(data[:3])  # 绘制x,y,z平移误差的箱线图
-    ax11.set_xticklabels(['x', 'y', 'z'])
+    bp11 = ax11.boxplot(data[:2])  # 绘制x,y平移误差的箱线图
+    ax11.set_xticklabels(['x', 'y'])
     # 只显示最大异常值
     for outliers in bp11['fliers']:
-        outliers.set_data([[outliers.get_xdata()[0]], [[np.max(outliers.get_ydata())]]])
-
-    ax12 = fig1.add_subplot(122)  # 右子图：旋转误差
-    ax12.set_title('Rotation Errors (deg)')
-    bp12 = ax12.boxplot(data[5:])  # 绘制roll,pitch,yaw旋转误差的箱线图
-    ax12.set_xticklabels(['roll', 'pitch', 'yaw'])
-    # 只显示最大异常值
-    for outliers in bp12['fliers']:
         outliers.set_data([[outliers.get_xdata()[0]], [[np.max(outliers.get_ydata())]]])
 
     plt.savefig(save_root_dir + '/' + model_name + '/error_distribution.png')  # 保存误差分布图
     plt.show()  # 显示图像
 
-    # 图像检查器：可视化错误图像对
-    if check_image:
-        idx = 0  # 当前图像索引
-        idx_prev = -1  # 上一个图像索引
-        print(len(paths))  # 打印错误图像对数量
-        while paths:  # 循环直到用户退出
-
-            if idx is not idx_prev:  # 如果索引改变
-                idx_prev = idx
-
-                # 打印图像信息和误差
-                print('img_a: {}, img_b: {}'.format(get_stem(paths[idx][0]), get_stem(paths[idx][1])))
-                print('output: {}\nlabel: {}\nerror:{}'.format(paths[idx][2], paths[idx][3], paths[idx][4]))
-
-                # 加载图像
-                img_a = cv2.imread(paths[idx][0])
-                img_b = cv2.imread(paths[idx][1])
-
-            # 显示图像
-            cv2.imshow('a', img_a)
-            cv2.imshow('b', img_b)
-
-            # 等待用户按键
-            key = cv2.waitKeyEx(0)
-
-            if key == 97:  # a键：上一张图像
-                idx -= 1
-                idx = max(idx, 0)
-            elif key == 100:  # d键：下一张图像
-                idx += 1
-                idx = min(idx, len(paths) - 1)
-            elif key == 27:  # ESC键：退出
-                break
-            else:
-                print('Unknown key: {}'.format(key))
-
     # 生成精度-阈值曲线
     if make_curve:
         # 创建阈值列表
-        xyz_thres_list = list(np.arange(0, xyz_error_max, xyz_error_reso))
-        rpy_thres_list = list(np.arange(0, rpy_error_max, rpy_error_reso))
+        xy_thres_list = list(np.arange(0, xy_error_max, xy_error_reso))
 
         # 计算每个误差维度的精度-阈值曲线
-        x_accuracy_list, x_thres_list = accuracy_thres_curve(data[0], xyz_thres_list)
-        y_accuracy_list, y_thres_list = accuracy_thres_curve(data[1], xyz_thres_list)
-        z_accuracy_list, z_thres_list = accuracy_thres_curve(data[2], xyz_thres_list)
-        ro_accuracy_list, ro_thres_list = accuracy_thres_curve(data[5], rpy_thres_list)
-        pi_accuracy_list, pi_thres_list = accuracy_thres_curve(data[6], rpy_thres_list)
-        ya_accuracy_list, ya_thres_list = accuracy_thres_curve(data[7], rpy_thres_list)
-
+        x_accuracy_list, x_thres_list = accuracy_thres_curve(data[0], xy_thres_list)
+        y_accuracy_list, y_thres_list = accuracy_thres_curve(data[1], xy_thres_list)
+      
         # 创建精度-阈值曲线图
         fig2 = plt.figure()
         ax21 = fig2.add_subplot(211)  # 上子图：平移误差
         ax21.set_xlabel('Threshold (mm)')
         ax21.set_ylabel('Fraction of pass')
-        lines21 = ax21.plot(x_thres_list, x_accuracy_list, 'r-', y_thres_list, y_accuracy_list, 'g-', z_thres_list,
-                  z_accuracy_list, 'b-')
+        lines21 = ax21.plot(x_thres_list, x_accuracy_list, 'r-', y_thres_list, y_accuracy_list, 'g-')
         ax21.set_xticks(np.arange(min(x_thres_list), max(x_thres_list) + 1, 1.0))
-        ax21.legend(lines21, ('x', 'y', 'z'))
-
-        ax22 = fig2.add_subplot(212)  # 下子图：旋转误差
-        ax22.set_xlabel('Threshold (deg)')
-        ax22.set_ylabel('Fraction of pass')
-        lines22 = ax22.plot(ro_thres_list, ro_accuracy_list, 'r-', pi_thres_list, pi_accuracy_list, 'g-', ya_thres_list,
-                  ya_accuracy_list, 'b-')
-        ax22.set_xticks(np.arange(min(ro_thres_list), max(ro_thres_list) + 1, 0.5))
-        ax22.legend(lines22, ('roll', 'pitch', 'yaw'))
+        ax21.legend(lines21, ('x', 'y'))
 
         plt.tight_layout()  # 调整布局
         plt.savefig(save_root_dir + '/' + model_name + '/error_curve.png')  # 保存精度-阈值曲线
         plt.show()  # 显示图像
-
 
 if __name__ == '__main__':  # 主程序入口
 
