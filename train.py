@@ -18,7 +18,7 @@ from utils import check_dir, axis_angle_from_quat, normalize_q, get_stem, accura
 from transformations import angle_between_vectors, euler_from_quaternion  # 导入变换相关函数
 
 # 模型配置参数
-model_name = 'VSNet-AF-400train'  # 模型名称
+model_name = 'VSNet-AF-400train-4'  # 模型名称
 model_pretrained = None  # 预训练模型路径，None表示不使用预训练
 num_classes = 2  # 输出类别数，X和Y
 
@@ -43,7 +43,7 @@ test_size_list = [20] * len(set_list)  # 每个数据集的测试样本数量
 
 # 训练配置参数
 num_epochs = 10  # 训练轮数
-batch_size = 256  # 批处理大小
+batch_size = 128  # 批处理大小
 aug_factor = 1  # 数据增强因子，增强比例为25%
 num_workers = 8  # 数据加载的工作进程数
 
@@ -53,9 +53,9 @@ milestones = [int(num_epochs * 0.4), int(num_epochs * 0.6), int(num_epochs * 0.8
 # milestones = list(range(num_epochs))  # 可选：每个epoch都调整学习率
 gamma = 0.5  # 学习率衰减倍数
 momentum = 0.9  # 动量参数
-# gamma = 0.3  # 可选的学习率衰减倍数
 limits = None  # 偏差限制，None表示不限制
 weights = [1, 0]  # 损失权重，平移和旋转的权重分配
+weight_decay = 1e-4  # 权重衰减，L2正则化参数
 
 # 运行模式配置
 mode = ('train', 'train')  # 运行模式：训练训练集
@@ -65,13 +65,18 @@ mode = ('train', 'train')  # 运行模式：训练训练集
 
 random_seed = 2  # 随机种子，确保结果可复现
 
-CUDA_DEVICE_ID = 0  # CUDA设备编号
 GPU_IDS = [0]  # GPU设备ID列表，可以设置多个GPU如[0, 1, 2, 3]
 
 # 断点保存和恢复配置
 resume_training = False  # 是否从断点恢复训练
 checkpoint_interval = 1  # 每隔多少个epoch保存一次断点
 checkpoint_path = save_root_dir + '/' + model_name + '/checkpoint.pth'  # 断点文件路径
+
+# 早停配置
+early_stopping_enabled = True  # 是否启用早停
+early_stopping_patience = 10  # 验证集指标连续多少个epoch不提升后停止
+early_stopping_min_delta = 1e-4  # 判定为提升的最小变化量
+best_model_path = save_root_dir + '/' + model_name + '/best_model.pth'  # 最优模型路径
 
 def prepare_loaders(return_path=False):  # 准备数据加载器的函数
     """
@@ -110,8 +115,8 @@ def prepare_loaders(return_path=False):  # 准备数据加载器的函数
 
     # 创建数据加载器
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    dev_loader = DataLoader(dev_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    dev_loader = DataLoader(dev_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     return train_loader, dev_loader, test_loader, train_size_aug, dev_size_aug, test_size_aug
 
@@ -130,7 +135,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, tb_count, checkpoint_pat
     """
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict() if hasattr(model, 'state_dict') else model.module.state_dict(),
+        'model_state_dict': model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'tb_count': tb_count
@@ -168,7 +173,7 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
     """
     check_dir(save_root_dir + '/' + model_name)  # 检查并创建保存目录
 
-    device = torch.device('cuda:{}'.format(CUDA_DEVICE_ID))  # 设置计算设备为指定的GPU
+    device = torch.device('cuda:{}'.format(GPU_IDS[0]))  # 设置计算设备为指定的GPU
 
     # 加载或创建模型
     if model_pretrained:  # 如果有预训练模型
@@ -180,7 +185,9 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
         model = nn.DataParallel(model, device_ids=GPU_IDS)  # 多GPU使用DataParallel
 
     # criterion = nn.MSELoss(reduction='sum')  # 可选的损失函数
+    #optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)  # 使用Adam优化器
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)  # 使用Adam优化器
+
     # optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)  # 可选的SGD优化器
 
     model.to(device)  # 将模型移动到GPU
@@ -193,6 +200,8 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
 
     tb_count = 0  # TensorBoard计数器
     start_epoch = 0  # 起始epoch
+    best_dev_score = np.inf
+    no_improve_count = 0
     
     # 检查是否从断点恢复训练
     if resume_training:
@@ -220,8 +229,6 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
             print('Checkpoint file not found at {}. Starting from scratch.'.format(checkpoint_path))
     
     for epoch in range(start_epoch, num_epochs):  # 从起始epoch开始遍历
-
-        scheduler.step()  # 更新学习率
 
         # Training - 训练阶段
         model.train()  # 设置模型为训练模式
@@ -276,11 +283,12 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
             tb.log_value(name='x/mm', value=error[0], step=tb_count)
             tb.log_value(name='y/mm', value=error[1], step=tb_count)
             tb_count += 1
-
+            
         # Dev eval - 验证集评估
         model.eval()  # 设置模型为评估模式，禁用dropout等训练时特有的层
         with torch.no_grad():  # 禁用梯度计算，减少内存消耗并加速计算
             running_error_dev = np.zeros(2)  # 初始化验证集累积误差数组
+            running_loss_dev = 0.0  # 初始化验证集累积损失
             # running_error_dev = np.zeros(2)  # 可选：只计算部分误差
             for i, sample in enumerate(dev_loader, 0):  # 遍历验证数据
                 img_a, img_b, label = sample  # 获取图像对和标签
@@ -288,15 +296,17 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
                 # 将数据移动到GPU
                 img_a = img_a.to(device)
                 img_b = img_b.to(device)
+                label = label.to(device)
 
                 output = model(img_a, img_b)  # 前向传播，获取预测结果
+                loss = loss_xy(output, label)  # 计算验证集损失
+                running_loss_dev += loss.item() * output.shape[0]  # 累积验证集损失
 
                 # 将数据移回CPU用于计算误差
                 output = output.cpu().detach().numpy()
-                label = label.numpy()
+                label = label.cpu().detach().numpy()
 
                 error = np.zeros(2)  # 初始化当前批次的误差数组
-                # error = np.zeros(2)  # 可选：只计算部分误差
 
                 # 计算每个样本的误差
                 for j in range(output.shape[0]):
@@ -308,38 +318,69 @@ def mode_train(train_loader, dev_loader, train_size_aug, dev_size_aug):  # 训�
 
                 # 打印验证信息
                 print(
-                    '[EVAL][{}] Epoch {}, Batch {}, error: x={:0.2f}mm,y={:0.2f}mm,z={:0.2f}mm,mag={:0.2f}deg,dir={:0.2f}deg'.format(
-                        time.time() - start_time, epoch + 1, i + 1, *error))
+                    '[EVAL][{}] Epoch {}, Batch {}, Loss={:0.7f}, error: x={:0.2f}mm,y={:0.2f}mm'.format(
+                        time.time() - start_time, epoch + 1, i + 1, loss.item(), *error))
 
         # 计算平均损失和误差
         average_loss = running_loss / train_size_aug  # 计算平均训练损失
+        average_dev_loss = running_loss_dev / dev_size_aug  # 计算平均验证损失
         average_error = running_error_dev / dev_size_aug  # 计算平均验证误差
         # 打印总结信息
         print(
-            '[SUMMARY][{}] Summary: Epoch {}, loss = {:0.7f}, dev_eval: x={:0.2f}mm,y={:0.2f}mm\n\n'.format(
-                time.time() - start_time, epoch + 1, average_loss, *average_error))
+            '[SUMMARY][{}] Summary: Epoch {}, Train Loss={:0.7f}, Dev Loss={:0.7f}, Dev Error: x={:0.2f}mm,y={:0.2f}mm\n'.format(
+                time.time() - start_time, epoch + 1, average_loss, average_dev_loss, *average_error))
 
         # 记录到TensorBoard
-        tb.log_value(name='Dev loss', value=average_loss, step=epoch)  # 记录验证损失
+        tb.log_value(name='Train loss', value=average_loss, step=epoch)  # 记录训练损失
+        tb.log_value(name='Dev loss', value=average_dev_loss, step=epoch)  # 记录验证损失
         tb.log_value(name='Dev x/mm', value=average_error[0], step=epoch)  # 记录x轴平移误差
         tb.log_value(name='Dev y/mm', value=average_error[1], step=epoch)  # 记录y轴平移误差
-    
-        # 保存模型
-        model_to_save = model.module if hasattr(model, 'module') else model
-        torch.save(model_to_save.state_dict(), save_root_dir + '/' + model_name + '/model.pth')  # 保存模型状态字典
-        print('Model saved at {}/{}/model.pth'.format(save_root_dir, model_name))  # 打印保存路径
-        
+
+        scheduler.step()  # 更新学习率
+
         # 保存loss和error数据为txt文件
         results_dir = save_root_dir + '/' + model_name
-        with open(results_dir + '/training_log.txt', 'a') as f:
+        with open(results_dir + '/Val_log.txt', 'a') as f:
             f.write('Epoch {}, Loss = {:0.7f}, Dev Error: x={:0.2f}mm, y={:0.2f}mm\n'.format(
-                epoch + 1, average_loss, average_error[0], average_error[1]))
-        print('Training log saved at {}/training_log.txt'.format(results_dir))
+                epoch + 1, average_dev_loss, average_error[0], average_error[1]))
+        print('Val log saved at {}/Val_log.txt'.format(results_dir))
  
         # 保存断点
         if (epoch + 1) % checkpoint_interval == 0:
             save_checkpoint(model, optimizer, scheduler, epoch, tb_count, checkpoint_path)
 
+        # 早停逻辑：以dev x/y误差之和作为监控指标（越小越好）
+        if early_stopping_enabled:
+            # 计算当前epoch的验证集评分（x轴误差 + y轴误差）
+            current_dev_score = float(average_error[0] + average_error[1])
+            
+            # 检查当前评分是否比最佳评分有明显改善
+            # 只有改善量大于early_stopping_min_delta才算真正改善
+            if current_dev_score < best_dev_score - early_stopping_min_delta:
+                # 更新最佳验证集评分
+                best_dev_score = current_dev_score
+                # 重置未改善计数器
+                no_improve_count = 0
+                # 保存当前模型为最佳模型
+                model_to_save = model.module if hasattr(model, 'module') else model
+                torch.save(model_to_save.state_dict(), best_model_path)
+                # 打印模型更新信息
+                print('Best model updated at {}, dev score={:0.6f}'.format(best_model_path, best_dev_score))
+                with open(results_dir + '/Val_log.txt', 'a') as f:
+                    f.write('Best model updated at Epoch {}, dev score={:0.6f}\n'.format(epoch + 1, best_dev_score))
+            else:
+                # 验证集评分没有改善，增加未改善计数器
+                no_improve_count += 1
+                # 打印早停计数器状态
+                print('Early stopping counter: {}/{}'.format(no_improve_count, early_stopping_patience))
+                
+                # 检查是否达到早停条件
+                # 如果连续early_stopping_patience个epoch都没有改善，则触发早停
+                if no_improve_count >= early_stopping_patience:
+                    # 打印早停触发信息
+                    print('Early stopping triggered at epoch {}.'.format(epoch + 1))
+                    # 跳出训练循环，停止训练
+                    break
 
 def mode_eval(loader, size_aug):  # 评估模式函数
     """
@@ -356,13 +397,16 @@ def mode_eval(loader, size_aug):  # 评估模式函数
         xy_error_max = 10.0  # mm - 平移误差最大值
         xy_error_reso = 0.01  # mm - 平移误差分辨率
 
-    device = torch.device('cuda:{}'.format(CUDA_DEVICE_ID))  # 设置计算设备为指定的GPU
+    device = torch.device('cuda:{}'.format(GPU_IDS[0]))  # 设置计算设备为指定的GPU
 
     # 创建模型实例
     model = VSNet(num_classes=num_classes)
     
     # 加载模型状态字典
-    model_state_dict = torch.load(save_root_dir + '/' + model_name + '/model.pth', map_location=device)
+    if os.path.exists(best_model_path):
+        model_state_dict = torch.load(best_model_path, map_location=device)
+    else:
+        model_state_dict = torch.load(checkpoint_path, map_location=device)['model_state_dict']
     model.load_state_dict(model_state_dict)
 
     # 如果需要多GPU评估

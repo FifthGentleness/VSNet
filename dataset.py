@@ -139,7 +139,6 @@ def split_sets(img_dir_list, label_dir_list,  # 分割数据集的函数
 
     return ret_train_paths, ret_dev_paths, ret_test_paths  # 返回所有数据集路径
 
-
 class VSDataset(Dataset):  # 视觉里程计数据集类
 
     def __init__(self, set_paths, img_size, return_path=False):  # 初始化函数
@@ -153,7 +152,7 @@ class VSDataset(Dataset):  # 视觉里程计数据集类
             ])
         else:  # 如果需要调整尺寸
             self.img_transform = transforms.Compose([  # 图像变换管道
-                transforms.Resize(size=img_size), # TODO,bug: here should be (h,w)! - 调整图像尺寸
+                transforms.Resize(size=(img_size[1], img_size[0])), # TODO,bug: here should be (h,w)! - 调整图像尺寸
                 transforms.ToTensor(),  # 转换为张量
             ])
 
