@@ -145,14 +145,14 @@ class VSDataset(Dataset):  # 视觉里程计数据集类
         self.set_paths = set_paths  # 存储路径对
         self.return_path = return_path  # 是否返回路径标志
 
-        if img_size == (640, 480):  # 如果是原始图像尺寸
+        if img_size == (1024, 1280):  # 如果是原始图像尺寸
             # print('No resizing needed.')
             self.img_transform = transforms.Compose([  # 图像变换管道
                 transforms.ToTensor(),  # 转换为张量
             ])
         else:  # 如果需要调整尺寸
             self.img_transform = transforms.Compose([  # 图像变换管道
-                transforms.Resize(size=(img_size[1], img_size[0])), # TODO,bug: here should be (h,w)! - 调整图像尺寸
+                transforms.Resize(size=img_size), # TODO,bug: here should be (h,w)! - 调整图像尺寸
                 transforms.ToTensor(),  # 转换为张量
             ])
 

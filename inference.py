@@ -13,7 +13,9 @@ import torch.nn as nn  # 导入PyTorch的神经网络模块
 import time  # 导入时间模块，用于计时
 
 
-model_name = 'VSNet-AF-400train-4'  # 模型名称
+model_name = 'VSNet-AF-400train-7'  # 模型名称
+batch_size = 1  # 批次大小
+GPU_IDS = [0]  # GPU设备ID列表，可以设置多个GPU如[0, 1, 2, 3]
 
 # 数据集配置参数
 root_dir = './AngFeng_Dataset'  # 数据根目录
@@ -29,7 +31,7 @@ label_dir_list = [root_dir + '/' + pattern + my_set + '/label' for my_set in set
 # 保存配置参数
 save_root_dir = './results'  # 保存根目录
 log_name = save_root_dir + '/' + model_name + '/' + 'log.txt'  # 日志文件路径
-img_size = (1280, 1024)  # 输入图像尺寸
+img_size = (1024, 1280)  # 输入图像尺寸,高度,宽度
 best_model_path = save_root_dir + '/' + model_name + '/' + 'best_model.pth'  # 最佳模型路径
 inference_results_dir = save_root_dir + '/' + model_name + '/' + 'inference_results'  # 推理结果保存目录
 # 数据集大小配置
@@ -38,13 +40,8 @@ dev_size_list = [20] * len(set_list)  # 每个数据集的验证样本数量
 test_size_list = [20] * len(set_list)  # 每个数据集的测试样本数量
 
 random_seed = 2 # 随机种子，用于数据划分和模型训练的可重复性
-
-batch_size = 1  # 批次大小
 num_workers = 0  # 数据加载器的工作线程数，0表示在主
-
 num_classes = 2  # 输出类别数，X和Y
-GPU_IDS = [0]  # GPU设备ID列表，可以设置多个GPU如[0, 1, 2, 3]
-
 
 def get_test_raw_samples(img_dir_list, label_dir_list,  # 函数定义，获取测试集原始样本（单帧图像和其标签路径）
                          train_size_list=[600], dev_size_list=[200], test_size_list=[200],  # 各数据集大小列表
@@ -120,13 +117,13 @@ class TestRawDataset(Dataset):  # 测试集原始样本数据集类
     def __init__(self, raw_samples, img_size):
         self.raw_samples = raw_samples
 
-        if img_size == (640, 480):
+        if img_size == (1024, 1280):  # 如果是原始图像尺寸
             self.img_transform = transforms.Compose([
                 transforms.ToTensor(),
             ])
         else:
             self.img_transform = transforms.Compose([
-                transforms.Resize(size=(img_size[1], img_size[0])),
+                transforms.Resize(size=img_size),
                 transforms.ToTensor(),
             ])
 
@@ -162,7 +159,7 @@ def main():  # 主函数，执行推理流程
     
     # 将基础图像路径转换为张量
     img_base_tensor = transforms.Compose([  # 创建图像变换管道
-        transforms.Resize(size=(img_size[1], img_size[0])),  # 调整图像尺寸为指定大小
+        transforms.Resize(size=img_size),  # 调整图像尺寸为指定大小
         transforms.ToTensor(),  # 将PIL Image转换为PyTorch张量
     ])(Image.open(img_base))  # 打开基础图像并应用变换
     

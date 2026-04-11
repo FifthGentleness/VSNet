@@ -17,8 +17,16 @@ from model import VSNet, loss_xy  # 从模型模块导入VSNet类和组合损失
 from utils import check_dir, axis_angle_from_quat, normalize_q, get_stem, accuracy_thres_curve  # 导入工具函数
 from transformations import angle_between_vectors, euler_from_quaternion  # 导入变换相关函数
 
+model_name = 'VSNet-AF-400train-7'  # 模型名称
+batch_size = 1  # 批处理大小
+GPU_IDS = [0]  # GPU设备ID列表，可以设置多个GPU如[0, 1, 2, 3]
+# 运行模式配置
+mode = ('train', 'train')  # 运行模式：训练训练集
+# mode = ('eval', 'train')  # 评估训练集
+# mode = ('eval', 'dev')  # 评估验证集
+# mode = ('eval', 'test')  # 评估测试集
+
 # 模型配置参数
-model_name = 'VSNet-AF-400train-4'  # 模型名称
 model_pretrained = None  # 预训练模型路径，None表示不使用预训练
 num_classes = 2  # 输出类别数，X和Y
 
@@ -34,7 +42,7 @@ label_dir_list = [root_dir + '/' + pattern + my_set + '/label' for my_set in set
 # 保存配置参数
 save_root_dir = './results'  # 保存根目录
 log_name = save_root_dir + '/' + model_name + '/' + 'log.txt'  # 日志文件路径
-img_size = (1280, 1024)  # 输入图像尺寸
+img_size = (1024, 1280)   #输入图像尺寸,高度,宽度
 
 # 数据集大小配置
 train_size_list = [360] * len(set_list)  # 每个数据集的训练样本数量
@@ -43,7 +51,6 @@ test_size_list = [20] * len(set_list)  # 每个数据集的测试样本数量
 
 # 训练配置参数
 num_epochs = 10  # 训练轮数
-batch_size = 128  # 批处理大小
 aug_factor = 1  # 数据增强因子，增强比例为25%
 num_workers = 8  # 数据加载的工作进程数
 
@@ -57,15 +64,7 @@ limits = None  # 偏差限制，None表示不限制
 weights = [1, 0]  # 损失权重，平移和旋转的权重分配
 weight_decay = 1e-4  # 权重衰减，L2正则化参数
 
-# 运行模式配置
-mode = ('train', 'train')  # 运行模式：训练训练集
-# mode = ('eval', 'train')  # 评估训练集
-# mode = ('eval', 'dev')  # 评估验证集
-# mode = ('eval', 'test')  # 评估测试集
-
 random_seed = 2  # 随机种子，确保结果可复现
-
-GPU_IDS = [0]  # GPU设备ID列表，可以设置多个GPU如[0, 1, 2, 3]
 
 # 断点保存和恢复配置
 resume_training = False  # 是否从断点恢复训练
